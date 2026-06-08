@@ -40,6 +40,7 @@ interface ProcessedOutput {
   height: number;
   name: string;
   skippedVisibleRestore: boolean;
+  unmarkerApplied: boolean;
   url: string;
   width: number;
 }
@@ -63,6 +64,7 @@ const SCALE_OPTIONS = [2, 3, 4] as const;
 function App() {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [scale, setScale] = useState<UpscaleScale>(2);
+  const [applyUnmarker, setApplyUnmarker] = useState(true);
   const [jpegQuality, setJpegQuality] = useState(0.88);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -208,7 +210,7 @@ function App() {
       try {
         const result = await processUpscaleAndUnmarkImage(
           item.file,
-          { jpegQuality, scale },
+          { applyUnmarker, jpegQuality, scale },
           abortController.signal,
           (progress) => updateProcessingProgress(item.id, progress, updateItem),
         );
@@ -221,6 +223,7 @@ function App() {
             height: result.outputHeight,
             name: result.fileName,
             skippedVisibleRestore: result.skippedVisibleRestore,
+            unmarkerApplied: result.unmarkerApplied,
             url: outputUrl,
             width: result.outputWidth,
           },
@@ -274,7 +277,7 @@ function App() {
     } else {
       toast.error("Aucune image n'a pu etre traitee.");
     }
-  }, [isProcessing, items, jpegQuality, scale, updateItem]);
+  }, [applyUnmarker, isProcessing, items, jpegQuality, scale, updateItem]);
 
   const downloadOne = useCallback((item: QueueItem & { output: ProcessedOutput }) => {
     triggerBrowserDownload(item.output.url, item.output.name);
@@ -298,7 +301,7 @@ function App() {
       const url = URL.createObjectURL(zipBlob);
       triggerBrowserDownload(
         url,
-        `images-upscaled-unmarked-${completedItems.length}.zip`,
+        `images-upscaled-${applyUnmarker ? "unmarked" : "only"}-${completedItems.length}.zip`,
       );
       window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
       toast.success("ZIP pret.");
@@ -307,7 +310,7 @@ function App() {
     } finally {
       setIsZipping(false);
     }
-  }, [completedItems, isZipping]);
+  }, [applyUnmarker, completedItems, isZipping]);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -335,7 +338,7 @@ function App() {
             <div className="flex min-w-0 flex-col gap-2">
               <div className="flex items-center gap-2 text-ui-overline text-primary">
                 <LightningIcon weight="bold" />
-                <span>Upscale + Unmarker</span>
+                <span>{applyUnmarker ? "Upscale + Unmarker" : "Upscale seul"}</span>
               </div>
               <h1 className="text-3xl leading-tight font-black sm:text-5xl lg:text-6xl">
                 Traitement image en une passe
@@ -435,6 +438,22 @@ function App() {
                   />
                 </label>
 
+                <label className="flex items-start gap-3 border p-3">
+                  <input
+                    className="accent-primary mt-1 size-4 shrink-0"
+                    type="checkbox"
+                    checked={applyUnmarker}
+                    disabled={isProcessing}
+                    onChange={(event) => setApplyUnmarker(event.target.checked)}
+                  />
+                  <span className="flex min-w-0 flex-col gap-1">
+                    <span className="text-ui-title">Appliquer Unmarker</span>
+                    <span className="text-muted-foreground text-xs font-medium">
+                      Desactive pour uniquement upscaler et exporter en JPG.
+                    </span>
+                  </span>
+                </label>
+
                 <p className="text-muted-foreground text-xs font-medium">
                   Limite navigateur: {MAX_OUTPUT_MEGAPIXELS} MP apres upscale
                   par image.
@@ -449,7 +468,7 @@ function App() {
                   onClick={startProcessing}
                 >
                   <LightningIcon data-icon="inline-start" weight="bold" />
-                  Upscaler + unmarker
+                  {applyUnmarker ? "Upscaler + unmarker" : "Upscaler seulement"}
                 </Button>
                 <div className="grid grid-cols-2 gap-2">
                   <Button

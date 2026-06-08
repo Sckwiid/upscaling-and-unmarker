@@ -19,9 +19,11 @@ export type BatchProcessStage =
   | "shake"
   | "stir"
   | "crush"
+  | "export"
   | "complete";
 
 export interface BatchProcessOptions {
+  applyUnmarker: boolean;
   jpegQuality: number;
   scale: UpscaleScale;
 }
@@ -40,6 +42,7 @@ export interface ProcessedImageResult {
   skippedVisibleRestore: boolean;
   sourceHeight: number;
   sourceWidth: number;
+  unmarkerApplied: boolean;
   warnings: string[];
 }
 
@@ -72,8 +75,26 @@ export async function processUpscaleAndUnmarkImage(
     signal,
     onProgress,
   );
-  const ctx = getCanvasContext(canvas);
+  if (!options.applyUnmarker) {
+    report(onProgress, "export", "Export JPG upscale", 92);
+    const blob = await encodeCanvasAsJpeg(canvas, options.jpegQuality, signal);
 
+    report(onProgress, "complete", "Pret", 100);
+
+    return {
+      blob,
+      fileName: buildOutputFileName(file.name, options.scale, false),
+      outputHeight,
+      outputWidth,
+      skippedVisibleRestore: true,
+      sourceHeight,
+      sourceWidth,
+      unmarkerApplied: false,
+      warnings,
+    };
+  }
+
+  const ctx = getCanvasContext(canvas);
   report(onProgress, "restore", "Unmarker visible", 48);
   const skippedVisibleRestore = await runVisibleRestore(
     ctx,
@@ -97,12 +118,13 @@ export async function processUpscaleAndUnmarkImage(
 
   return {
     blob,
-    fileName: buildOutputFileName(file.name, options.scale),
+    fileName: buildOutputFileName(file.name, options.scale, true),
     outputHeight,
     outputWidth,
     skippedVisibleRestore,
     sourceHeight,
     sourceWidth,
+    unmarkerApplied: true,
     warnings,
   };
 }
@@ -309,7 +331,11 @@ function createCanvasSnapshot(canvas: HTMLCanvasElement) {
   return snapshot;
 }
 
-function buildOutputFileName(fileName: string, scale: UpscaleScale) {
+function buildOutputFileName(
+  fileName: string,
+  scale: UpscaleScale,
+  applyUnmarker: boolean,
+) {
   const dot = fileName.lastIndexOf(".");
   const base = dot > 0 ? fileName.slice(0, dot) : fileName;
   const safeBase =
@@ -319,7 +345,63 @@ function buildOutputFileName(fileName: string, scale: UpscaleScale) {
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "") || "image";
 
-  return `${safeBase}-x${scale}-unmarked.jpg`;
+  return `${safeBase}-x${scale}-${applyUnmarker ? "unmarked" : "upscaled"}.jpg`;
+}
+
+function encodeCanvasAsJpeg(
+  canvas: HTMLCanvasElement,
+  quality: number,
+  signal?: AbortSignal,
+) {
+  assertNotAborted(signal);
+  const clampedQuality = Math.max(0.7, Math.min(0.96, quality));
+
+  return new Promise<Blob>((resolve, reject) => {
+    let settled = false;
+
+    function cleanup() {
+      signal?.removeEventListener("abort", onAbort);
+    }
+
+    function finish(blob: Blob) {
+      if (settled) return;
+
+      settled = true;
+      cleanup();
+      resolve(blob);
+    }
+
+    function fail(error: unknown) {
+      if (settled) return;
+
+      settled = true;
+      cleanup();
+      reject(error);
+    }
+
+    function onAbort() {
+      fail(createAbortError());
+    }
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            fail(new Error("Export JPG impossible"));
+            return;
+          }
+
+          finish(blob);
+        },
+        "image/jpeg",
+        clampedQuality,
+      );
+    } catch (error) {
+      fail(error);
+    }
+  });
 }
 
 function nextFrame() {
