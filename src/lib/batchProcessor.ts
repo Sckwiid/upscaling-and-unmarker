@@ -18,6 +18,7 @@ export type BatchProcessStage =
   | "restore"
   | "shake"
   | "stir"
+  | "sharpen"
   | "crush"
   | "export"
   | "complete";
@@ -65,66 +66,96 @@ export async function processUpscaleAndUnmarkImage(
 
   assertCanvasBudget(outputWidth, outputHeight);
 
-  report(onProgress, "upscale", `Upscale x${options.scale}`, 14);
-  const canvas = await upscaleImage(
-    image,
-    sourceWidth,
-    sourceHeight,
-    outputWidth,
-    outputHeight,
-    signal,
-    onProgress,
-  );
-  if (!options.applyUnmarker) {
-    report(onProgress, "export", "Export JPG upscale", 92);
-    const blob = await encodeCanvasAsJpeg(canvas, options.jpegQuality, signal);
+  let canvas = createCanvasFromImage(image, sourceWidth, sourceHeight);
+
+  if (options.applyUnmarker) {
+    const ctx = getCanvasContext(canvas);
+    report(onProgress, "restore", "Unmarker visible", 14);
+    const skippedVisibleRestore = await runVisibleRestore(
+      ctx,
+      canvas,
+      warnings,
+      signal,
+      onProgress,
+      14,
+      34,
+    );
+
+    report(onProgress, "shake", "Unmarker geometry", 36);
+    const shakeSource = createCanvasSnapshot(canvas);
+    await applyShake(ctx, shakeSource, DEFAULT_OPTIONS.shake, signal);
+
+    report(onProgress, "stir", "Unmarker bruit", 48);
+    await applyStir(ctx, DEFAULT_OPTIONS.stir, signal);
+
+    report(onProgress, "upscale", `Upscale x${options.scale}`, 60);
+    canvas = await upscaleCanvas(
+      canvas,
+      sourceWidth,
+      sourceHeight,
+      outputWidth,
+      outputHeight,
+      signal,
+      onProgress,
+      60,
+      84,
+    );
+
+    report(onProgress, "sharpen", "Nettete upscale", 88);
+    await sharpenCanvas(canvas, signal);
+
+    report(onProgress, "crush", "Export JPG nettoye", 94);
+    const blob = await applyCrush(
+      canvas,
+      { quality: options.jpegQuality },
+      signal,
+    );
 
     report(onProgress, "complete", "Pret", 100);
 
     return {
       blob,
-      fileName: buildOutputFileName(file.name, options.scale, false),
+      fileName: buildOutputFileName(file.name, options.scale, true),
       outputHeight,
       outputWidth,
-      skippedVisibleRestore: true,
+      skippedVisibleRestore,
       sourceHeight,
       sourceWidth,
-      unmarkerApplied: false,
+      unmarkerApplied: true,
       warnings,
     };
   }
 
-  const ctx = getCanvasContext(canvas);
-  report(onProgress, "restore", "Unmarker visible", 48);
-  const skippedVisibleRestore = await runVisibleRestore(
-    ctx,
+  report(onProgress, "upscale", `Upscale x${options.scale}`, 14);
+  canvas = await upscaleCanvas(
     canvas,
-    warnings,
+    sourceWidth,
+    sourceHeight,
+    outputWidth,
+    outputHeight,
     signal,
     onProgress,
+    14,
+    84,
   );
 
-  report(onProgress, "shake", "Unmarker geometry", 72);
-  const shakeSource = createCanvasSnapshot(canvas);
-  await applyShake(ctx, shakeSource, DEFAULT_OPTIONS.shake, signal);
+  report(onProgress, "sharpen", "Nettete upscale", 88);
+  await sharpenCanvas(canvas, signal);
 
-  report(onProgress, "stir", "Unmarker bruit", 82);
-  await applyStir(ctx, DEFAULT_OPTIONS.stir, signal);
-
-  report(onProgress, "crush", "Export JPG nettoye", 93);
-  const blob = await applyCrush(canvas, { quality: options.jpegQuality }, signal);
+  report(onProgress, "export", "Export JPG upscale", 94);
+  const blob = await encodeCanvasAsJpeg(canvas, options.jpegQuality, signal);
 
   report(onProgress, "complete", "Pret", 100);
 
   return {
     blob,
-    fileName: buildOutputFileName(file.name, options.scale, true),
+    fileName: buildOutputFileName(file.name, options.scale, false),
     outputHeight,
     outputWidth,
-    skippedVisibleRestore,
+    skippedVisibleRestore: true,
     sourceHeight,
     sourceWidth,
-    unmarkerApplied: true,
+    unmarkerApplied: false,
     warnings,
   };
 }
@@ -162,22 +193,33 @@ async function loadImageFromFile(file: File, signal?: AbortSignal) {
   }
 }
 
-async function upscaleImage(
+function createCanvasFromImage(
   image: CanvasImageSource,
+  sourceWidth: number,
+  sourceHeight: number,
+) {
+  const canvas = document.createElement("canvas");
+  canvas.width = sourceWidth;
+  canvas.height = sourceHeight;
+  const ctx = getCanvasContext(canvas);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(image, 0, 0, sourceWidth, sourceHeight);
+  return canvas;
+}
+
+async function upscaleCanvas(
+  sourceCanvas: HTMLCanvasElement,
   sourceWidth: number,
   sourceHeight: number,
   outputWidth: number,
   outputHeight: number,
   signal: AbortSignal | undefined,
   onProgress: ProgressHandler | undefined,
+  progressStart: number,
+  progressEnd: number,
 ) {
-  let currentCanvas = document.createElement("canvas");
-  currentCanvas.width = sourceWidth;
-  currentCanvas.height = sourceHeight;
-  const currentCtx = getCanvasContext(currentCanvas);
-  currentCtx.imageSmoothingEnabled = true;
-  currentCtx.imageSmoothingQuality = "high";
-  currentCtx.drawImage(image, 0, 0, sourceWidth, sourceHeight);
+  let currentCanvas = sourceCanvas;
 
   const totalSteps = Math.max(
     1,
@@ -217,12 +259,60 @@ async function upscaleImage(
       onProgress,
       "upscale",
       `Upscale ${nextWidth} x ${nextHeight}`,
-      14 + (completedSteps / totalSteps) * 28,
+      progressStart +
+        (completedSteps / totalSteps) * (progressEnd - progressStart),
     );
     await nextFrame();
   }
 
   return currentCanvas;
+}
+
+async function sharpenCanvas(
+  canvas: HTMLCanvasElement,
+  signal?: AbortSignal,
+  amount = 0.18,
+) {
+  assertNotAborted(signal);
+
+  const ctx = getCanvasContext(canvas);
+  const { width, height } = canvas;
+  const original = ctx.getImageData(0, 0, width, height);
+  const blurredCanvas = createCanvasSnapshot(canvas);
+  const blurredCtx = getCanvasContext(blurredCanvas);
+  blurredCtx.clearRect(0, 0, width, height);
+  blurredCtx.filter = "blur(0.8px)";
+  blurredCtx.drawImage(canvas, 0, 0);
+  blurredCtx.filter = "none";
+  const blurred = blurredCtx.getImageData(0, 0, width, height);
+  const output = original.data;
+  const blurData = blurred.data;
+
+  const bytesPerChunk = 1_048_576;
+  for (let index = 0; index < output.length; index += 4) {
+    output[index] = clampByte(
+      output[index] + (output[index] - blurData[index]) * amount,
+    );
+    output[index + 1] = clampByte(
+      output[index + 1] + (output[index + 1] - blurData[index + 1]) * amount,
+    );
+    output[index + 2] = clampByte(
+      output[index + 2] + (output[index + 2] - blurData[index + 2]) * amount,
+    );
+
+    if (index > 0 && index % bytesPerChunk === 0) {
+      assertNotAborted(signal);
+      await nextFrame();
+    }
+  }
+
+  assertNotAborted(signal);
+  ctx.putImageData(original, 0, 0);
+  await nextFrame();
+}
+
+function clampByte(value: number) {
+  return Math.max(0, Math.min(255, Math.round(value)));
 }
 
 async function runVisibleRestore(
@@ -231,6 +321,8 @@ async function runVisibleRestore(
   warnings: string[],
   signal: AbortSignal | undefined,
   onProgress: ProgressHandler | undefined,
+  progressStart: number,
+  progressEnd: number,
 ) {
   try {
     const result = await processGeminiVisibleWatermark(
@@ -242,7 +334,7 @@ async function runVisibleRestore(
             onProgress,
             "restore",
             getVisibleRestoreLabel(stage),
-            getVisibleRestoreProgress(stage),
+            getVisibleRestoreProgress(stage, progressStart, progressEnd),
           ),
       },
     );
@@ -280,22 +372,28 @@ function getVisibleRestoreLabel(stage: GeminiWorkerProgressStage) {
   }
 }
 
-function getVisibleRestoreProgress(stage: GeminiWorkerProgressStage) {
+function getVisibleRestoreProgress(
+  stage: GeminiWorkerProgressStage,
+  progressStart: number,
+  progressEnd: number,
+) {
+  const span = progressEnd - progressStart;
+
   switch (stage) {
     case "loading-opencv":
-      return 50;
+      return progressStart + span * 0.15;
     case "loading-alpha":
-      return 54;
+      return progressStart + span * 0.3;
     case "detecting":
-      return 60;
+      return progressStart + span * 0.6;
     case "restoring":
-      return 65;
+      return progressStart + span * 0.78;
     case "inpainting":
-      return 69;
+      return progressStart + span * 0.9;
     case "done":
     case "skipped":
     case "error":
-      return 71;
+      return progressEnd;
   }
 }
 
